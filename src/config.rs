@@ -4,7 +4,7 @@ extern crate image;
 extern crate rand;
 
 use self::glutin::GlContext;
-use self::image::RgbImage;
+use self::image::{ImageBuffer, Rgb, RgbImage};
 use self::rand::Rng;
 use shader::Shader;
 use std::collections::HashMap;
@@ -161,9 +161,9 @@ impl Default for FitnessConfig {
     }
 }
 
-pub struct Config<'a> {
+pub struct Config {
     /// The filepath of the source image.
-    source_img_path: &'a str,
+    source_img: RgbImage,
 
     /// The `(r, g, b)` colours of threads that can be used in creating the thread art.
     threads: Vec<(f32, f32, f32)>,
@@ -182,6 +182,15 @@ pub struct Config<'a> {
     /// The background colour.
     background_colour: (f32, f32, f32),
 
+    /// The `(width, height)` of the peg grid cells.
+    ///
+    /// A width and height of 1 means a peg can be placed on any pixel in the image, which may not
+    /// be ideal for practical application since pegs are generally have larger diameters in reality.
+    ///
+    /// Ideally this is a factor of the source image width and height, otherwise the
+    /// right side and bottom will accumulate a margin.
+    cell_size: (u32, u32),
+
     mutation_config: MutationConfig,
 
     fitness_config: FitnessConfig,
@@ -189,15 +198,17 @@ pub struct Config<'a> {
     checkpoint_config: Option<CheckpointConfig>,
 }
 
-impl<'a> Config<'a> {
-    pub fn new(source_img_path: &'a str) -> Config {
+impl Config {
+    pub fn new(source_img_path: &str) -> Config {
+        let source_img = image::open(source_img_path).unwrap().to_rgb();
+
         Config {
-            // TODO(orglofch): Validate image.
-            source_img_path: source_img_path,
+            source_img: source_img,
             threads: Vec::new(),
             fixed_pegs: Vec::new(),
             mutable_pegs: Vec::new(),
             background_colour: (0.0, 0.0, 0.0),
+            cell_size: (1, 1),
             mutation_config: MutationConfig::default(),
             fitness_config: FitnessConfig::default(),
             checkpoint_config: None,
@@ -231,6 +242,11 @@ impl<'a> Config<'a> {
         self
     }
 
+    pub fn set_cell_size(&mut self, size: (u32, u32)) -> &Config {
+        self.cell_size = size;
+        self
+    }
+
     pub fn set_mutation_config(&mut self, mutation_config: MutationConfig) -> &Config {
         self.mutation_config = mutation_config;
         self
@@ -255,13 +271,10 @@ impl<'a> Config<'a> {
         // are dependent on one another and we don't want to require set ordering.
         self.validate();
 
-        // TODO(orglofch): Support other image types, grayscale etc.
-        let source_img = image::open(self.source_img_path).unwrap().to_rgb();
-
         let mut events_loop = glutin::EventsLoop::new();
         let window = glutin::WindowBuilder::new()
             .with_title("Thread Art Live Evolution")
-            .with_dimensions(source_img.width(), source_img.height());
+            .with_dimensions(self.source_img.width(), self.source_img.height());
         let context = glutin::ContextBuilder::new().with_vsync(true);
 
         let gl_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
@@ -281,6 +294,7 @@ impl<'a> Config<'a> {
                 1.0,
             );
 
+            gl::Enable(gl::LINE_SMOOTH);
             gl::Disable(gl::DEPTH_TEST);
             gl::Disable(gl::CULL_FACE);
         }
@@ -292,24 +306,32 @@ impl<'a> Config<'a> {
 
         let mut genome = Genome::new(self.mutable_pegs.clone());
 
+        //genome.mutable_pegs.push(Peg::new((512, 512)));
+        //genome.mutable_pegs.push(Peg::new((1020, 1020)));
+        //genome.actions.push(Action::new(0, 0));
+        //genome.actions.push(Action::new(0, 1));
+
         let mut previous_fitness = 0.0;
         let mut i = 0;
         loop {
             events_loop.poll_events(|_| ());
 
-            // TODO(orglofch): Support using an arbitrary texture for the background.
-
             unsafe {
                 gl::Clear(gl::COLOR_BUFFER_BIT);
             }
 
+            // TODO(orglofch): Support using an arbitrary texture for the background.
+
             let mut new_child = genome.clone();
             new_child.mutate(&self);
 
-            new_child.render(&self);
+            new_child.render_threads(&self);
 
             // TODO(orglofch): This isn't really tied to the genome, more the buffer.
-            let new_fitness = new_child.fitness(&self.fitness_config, &source_img);
+            let new_fitness = new_child.fitness(&self);
+
+            // Render pegs after the treads so they don't affect fitness.
+            new_child.render_pegs(&self);
 
             gl_window.swap_buffers().unwrap();
 
@@ -319,7 +341,7 @@ impl<'a> Config<'a> {
 
             // TODO(orglofch): Add boltzmann probability based on fitness for lower
             // fitness genomes.
-            if new_fitness >= previous_fitness || rng.gen_range::<f32>(0.0, 1.0) > 0.99 {
+            if new_fitness >= previous_fitness || rng.gen_range::<f32>(0.0, 1.0) > 1.1 {
                 genome = new_child;
                 previous_fitness = new_fitness;
             }
@@ -373,20 +395,21 @@ impl Action {
 /// A single peg.
 #[derive(Clone, Debug)]
 pub struct Peg {
-    /// The `(x, y)` position of the peg.
-    position: (f32, f32),
+    /// The `(x, y)` grid position of the peg.
+    pos: (u32, u32),
 }
 
 impl Peg {
-    pub fn new(position: (f32, f32)) -> Peg {
-        Peg { position: position }
+    pub fn new(pos: (u32, u32)) -> Peg {
+        Peg { pos: pos }
     }
 }
 
 /// Vertex information used in rendering the thread art.
 #[derive(Clone, Debug)]
 struct Vertex {
-    position: (f32, f32),
+    /// The `(x, y)` position of the peg in view space (E.g. ((-1, 1), (-1, 1))).
+    pos: (f32, f32),
 
     colour: (f32, f32, f32),
 }
@@ -394,7 +417,7 @@ struct Vertex {
 impl Vertex {
     fn new(peg: (f32, f32), thread: (f32, f32, f32)) -> Vertex {
         Vertex {
-            position: peg,
+            pos: peg,
             colour: thread,
         }
     }
@@ -419,29 +442,45 @@ pub struct Genome {
     /// of relying on deduping.
     mutable_pegs: Vec<Peg>,
 
-    vao: u32,
-    vbo: u32,
-    ebo: u32,
+    // TODO(orglofch): Share between genomes.
+    thread_vao: u32,
+    thread_vbo: u32,
+    thread_ebo: u32,
+
+    peg_vao: u32,
+    peg_vbo: u32,
+    peg_ebo: u32,
 }
 
 impl Genome {
     fn new(initial_pegs: Vec<Peg>) -> Genome {
-        let mut vao = 0;
-        let mut vbo = 0;
-        let mut ebo = 0;
+        let mut thread_vao = 0;
+        let mut thread_vbo = 0;
+        let mut thread_ebo = 0;
+
+        let mut peg_vao = 0;
+        let mut peg_vbo = 0;
+        let mut peg_ebo = 0;
 
         unsafe {
-            gl::GenVertexArrays(1, &mut vao);
-            gl::GenBuffers(1, &mut vbo);
-            gl::GenBuffers(1, &mut ebo);
+            gl::GenVertexArrays(1, &mut thread_vao);
+            gl::GenBuffers(1, &mut thread_vbo);
+            gl::GenBuffers(1, &mut thread_ebo);
+
+            gl::GenVertexArrays(1, &mut peg_vao);
+            gl::GenBuffers(1, &mut peg_vbo);
+            gl::GenBuffers(1, &mut peg_ebo);
         }
 
         Genome {
             actions: Vec::new(),
             mutable_pegs: initial_pegs,
-            vao: vao,
-            vbo: vbo,
-            ebo: ebo,
+            thread_vao: thread_vao,
+            thread_vbo: thread_vbo,
+            thread_ebo: thread_ebo,
+            peg_vao: peg_vao,
+            peg_vbo: peg_vbo,
+            peg_ebo: peg_ebo,
         }
     }
 
@@ -455,12 +494,9 @@ impl Genome {
 
         let mut prob_sum = mutation_config.insert_action_prob + mutation_config.remove_action_prob;
         if mutation_config.mutate_pegs {
-            prob_sum += mutation_config.insert_peg_prob
-                + mutation_config.remove_peg_prob
-                + mutation_config.move_peg_prob;
+            prob_sum += mutation_config.insert_peg_prob + mutation_config.remove_peg_prob +
+                mutation_config.move_peg_prob;
         }
-
-        // TODO(orglofch): Account for mutate_pegs.
 
         let mut rng = rand::thread_rng();
 
@@ -483,7 +519,7 @@ impl Genome {
 
         if mutation_config.mutate_pegs {
             if prob < mutation_config.insert_peg_prob {
-                self.mutate_insert_peg();
+                self.mutate_insert_peg(config);
                 return;
             }
             prob -= mutation_config.insert_peg_prob;
@@ -516,7 +552,7 @@ impl Genome {
         let action = Action::new(thread_id, peg_id);
 
         // Select a position in the action sequence to insert into.
-        // It's possible to insert at the beginning and end.
+        // Note, t's possible to insert at the beginning and end.
         let insertion_pos = rng.gen_range::<usize>(0, self.actions.len() + 1);
 
         self.actions.insert(insertion_pos, action);
@@ -537,14 +573,12 @@ impl Genome {
     }
 
     /// Mutate a `Genome` by inserting a new `PegGene`.
-    fn mutate_insert_peg(&mut self) {
-        // TODO(orglofch): Provide some reasonable amount of distance between pegs.
+    fn mutate_insert_peg(&mut self, config: &Config) {
         let mut rng = rand::thread_rng();
 
-        let x = rng.gen_range::<f32>(-1.0, 1.0);
-        let y = rng.gen_range::<f32>(-1.0, 1.0);
+        let x = rng.gen_range::<u32>(0, config.source_img.width() / config.cell_size.0);
+        let y = rng.gen_range::<u32>(0, config.source_img.height() / config.cell_size.1);
 
-        // Generated pegs are never fixed.
         let peg = Peg::new((x, y));
 
         // Generated pegs are never fixed
@@ -597,14 +631,15 @@ impl Genome {
 
         let peg = &mut self.mutable_pegs[move_pos];
 
-        let x = rng.gen_range::<f32>(-1.0, 1.0);
-        let y = rng.gen_range::<f32>(-1.0, 1.0);
+        let x = rng.gen_range::<u32>(0, config.source_img.width() / config.cell_size.0);
+        let y = rng.gen_range::<u32>(0, config.source_img.height() / config.cell_size.1);
 
-        peg.position = (x, y);
+        peg.pos = (x, y);
     }
 
-    /// Reindex the `Genome` into a format which can be buffered to the GPU for rendering.
-    fn reindex_for_rendering(&self, config: &Config) -> (Vec<Vertex>, Vec<u32>) {
+    /// Reindex the `Genome` threads into a format which can be buffered to the GPU for rendering.
+    fn reindex_threads_for_rendering(&self, config: &Config) -> (Vec<Vertex>, Vec<u32>) {
+        // TODO(orglofch): Presize.
         let mut vertices: Vec<Vertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
 
@@ -618,7 +653,13 @@ impl Genome {
                 &self.mutable_pegs[gene.peg_id - config.fixed_pegs.len()]
             };
 
-            let vertex = Vertex::new(peg.position, thread);
+            // Convert the cell position to view coordinates.
+            let view_x = (peg.pos.0 * config.cell_size.0) as f32 /
+                config.source_img.width() as f32 * 2.0 - 1.0;
+            let view_y = (peg.pos.1 * config.cell_size.1) as f32 /
+                config.source_img.height() as f32 * 2.0 - 1.0;
+
+            let vertex = Vertex::new((view_x, view_y), thread);
 
             if !final_index_by_vertex.contains_key(gene) {
                 vertices.push(vertex);
@@ -652,68 +693,133 @@ impl Genome {
     }
 
     /// Render a `Genome` to the onscreen buffer or back-buffer.
-    fn render(&self, config: &Config) {
-        let (vertices, indices) = self.reindex_for_rendering(config);
-        if vertices.len() == 0 || indices.len() == 0 {
-            return;
-        }
+    fn render_threads(&self, config: &Config) {
+        let (thread_vertices, thread_indices) = self.reindex_threads_for_rendering(config);
 
-        unsafe {
-            gl::BindVertexArray(self.vao);
+        if thread_vertices.len() != 0 && thread_indices.len() != 0 {
+            unsafe {
+                self.buffer_to_gpu(
+                    &thread_vertices,
+                    &thread_indices,
+                    self.thread_vao,
+                    self.thread_vbo,
+                    self.thread_ebo);
 
-            gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
-            let size = (vertices.len() * size_of::<Vertex>()) as isize;
-            let data = &vertices[0] as *const Vertex as *const c_void;
-            gl::BufferData(gl::ARRAY_BUFFER, size, data, gl::STATIC_DRAW);
+                gl::BindVertexArray(self.thread_vao);
+                gl::DrawElements(
+                    gl::LINES,
+                    thread_indices.len() as i32,
+                    gl::UNSIGNED_INT,
+                    ptr::null(),
+                );
 
-            gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, self.ebo);
-            let size = (indices.len() * size_of::<u32>()) as isize;
-            let data = &indices[0] as *const u32 as *const c_void;
-            gl::BufferData(gl::ELEMENT_ARRAY_BUFFER, size, data, gl::STATIC_DRAW);
-
-            let size = size_of::<Vertex>() as i32;
-            gl::EnableVertexAttribArray(0);
-            gl::VertexAttribPointer(
-                0,
-                2,
-                gl::FLOAT,
-                gl::FALSE,
-                size,
-                offset_of!(Vertex, position) as *const c_void,
-            );
-            gl::EnableVertexAttribArray(1);
-            gl::VertexAttribPointer(
-                1,
-                3,
-                gl::FLOAT,
-                gl::FALSE,
-                size,
-                offset_of!(Vertex, colour) as *const c_void,
-            );
-
-            gl::BindVertexArray(0);
-        }
-
-        unsafe {
-            gl::Enable(gl::LINE_SMOOTH);
-            gl::LineWidth(10.0);
-            gl::BindVertexArray(self.vao);
-            gl::DrawElements(
-                gl::LINES,
-                indices.len() as i32,
-                gl::UNSIGNED_INT,
-                ptr::null(),
-            );
-            gl::BindVertexArray(0);
+                gl::BindVertexArray(0);
+            }
         }
     }
 
+    /// Reindex the `Genome` pegs into a format which can be buffered to the GPU for rendering.
+    fn reindex_pegs_for_rendering(&self, config: &Config) -> (Vec<Vertex>, Vec<u32>) {
+        // TODO(orglofch): Presize.
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        for peg in self.mutable_pegs.iter() {
+            // Convert the cell position to view coordinates.
+            let view_x = (peg.pos.0 * config.cell_size.0) as f32 /
+                config.source_img.width() as f32 * 2.0 - 1.0;
+            let view_y = (peg.pos.1 * config.cell_size.1) as f32 /
+                config.source_img.height() as f32 * 2.0 - 1.0;
+
+            let vertex = Vertex::new((view_x, view_y), (0.5, 0.5, 0.5));
+
+            vertices.push(vertex);
+            indices.push(vertices.len() as u32);
+        }
+
+        // TODO(orglofch): Doing this each frame is unnecessary.
+        for peg in config.fixed_pegs.iter() {
+            // Convert the position to view coordinates.
+            let view_x = (peg.pos.0 * config.cell_size.0) as f32 /
+                config.source_img.width() as f32 * 2.0 - 1.0;
+            let view_y = (peg.pos.1 * config.cell_size.1) as f32 /
+                config.source_img.height() as f32 * 2.0 - 1.0;
+
+            let vertex = Vertex::new((view_x, view_y), (0.5, 0.5, 0.5));
+
+            vertices.push(vertex);
+            indices.push(vertices.len() as u32);
+        }
+
+        (vertices, indices)
+    }
+
+    /// Render a `Genome` to the onscreen buffer or back-buffer.
+    fn render_pegs(&self, config: &Config) {
+        let (peg_vertices, peg_indices) = self.reindex_pegs_for_rendering(config);
+        if peg_vertices.len() != 0 && peg_indices.len() != 0 {
+            unsafe {
+                self.buffer_to_gpu(
+                    &peg_vertices,
+                    &peg_indices,
+                    self.peg_vao,
+                    self.peg_vbo,
+                    self.peg_ebo);
+
+                gl::BindVertexArray(self.peg_vao);
+                gl::DrawElements(
+                    gl::POINTS,
+                    peg_indices.len() as i32,
+                    gl::UNSIGNED_INT,
+                    ptr::null(),
+                );
+            }
+        }
+    }
+
+    /// Buffer `Vertex` information to the GPU.
+    unsafe fn buffer_to_gpu(&self, vertices: &Vec<Vertex>, indices: &Vec<u32>, vao: u32, vbo: u32, ebo: u32) {
+        gl::BindVertexArray(vao);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        let size = (vertices.len() * size_of::<Vertex>()) as isize;
+        let data = &vertices[0] as *const Vertex as *const c_void;
+        gl::BufferData(gl::ARRAY_BUFFER, size, data, gl::STATIC_DRAW);
+
+        gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, ebo);
+        let size = (indices.len() * size_of::<u32>()) as isize;
+        let data = &indices[0] as *const u32 as *const c_void;
+        gl::BufferData(gl::ELEMENT_ARRAY_BUFFER, size, data, gl::STATIC_DRAW);
+
+        let size = size_of::<Vertex>() as i32;
+        gl::EnableVertexAttribArray(0);
+        gl::VertexAttribPointer(
+            0,
+            2,
+            gl::FLOAT,
+            gl::FALSE,
+            size,
+            offset_of!(Vertex, pos) as *const c_void,
+        );
+        gl::EnableVertexAttribArray(1);
+        gl::VertexAttribPointer(
+            1,
+            3,
+            gl::FLOAT,
+            gl::FALSE,
+            size,
+            offset_of!(Vertex, colour) as *const c_void,
+        );
+
+        gl::BindVertexArray(0);
+    }
+
     /// Calculates the fitness `Genome` relative to it's source image.
-    fn fitness(&self, fitness_config: &FitnessConfig, source_img: &RgbImage) -> f32 {
-        let pixel_values = source_img.width() * source_img.height() * 3;
+    fn fitness(&self, config: &Config) -> f32 {
+        let pixel_values = config.source_img.width() * config.source_img.height() * 3;
 
         // TODO(orglofch): Retina displays render at double the pixel size.
-        // instead of reading everything, render into a FBO half the window size.
+        // instead of reading everythinzg, render into a FBO half the window size.
         let mut buffer: Vec<u8> = vec![0_u8; (pixel_values * 4) as usize];
 
         // Read back the rendered state.
@@ -721,29 +827,48 @@ impl Genome {
             gl::ReadPixels(
                 0,
                 0,
-                source_img.width() as i32 * 2,
-                source_img.height() as i32 * 2,
+                config.source_img.width() as i32 * 2,
+                config.source_img.height() as i32 * 2,
                 gl::RGB,
                 gl::UNSIGNED_BYTE,
                 &mut buffer[0] as *mut u8 as *mut c_void,
             );
         }
 
-        let mut fitness = 0.0;
-        for r in 0..source_img.height() {
-            for c in 0..source_img.width() {
-                let pixel = source_img.get_pixel(c as u32, r as u32);
+        // Construct a new buffer to hold the difference.
+        let mut diff_buffer: Vec<u8> = vec![0_u8; (pixel_values * 4) as usize];
 
-                let i = (c * 2 + r * 2 * source_img.width() * 2) * 3;
+        let mut fitness = 0.0;
+        for r in 0..config.source_img.height() {
+            for c in 0..config.source_img.width() {
+                let pixel = config.source_img.get_pixel(c as u32, r as u32);
+
+                let i = (c * 2 + r * 2 * config.source_img.width() * 2) * 3;
+
+                let (gene_r, gene_g, gene_b) = (
+                    buffer[i as usize] as i32,
+                    buffer[(i + 1) as usize] as i32,
+                    buffer[(i + 2) as usize] as i32,
+                );
+                let (source_r, source_g, source_b) = (
+                    pixel.data[0] as i32,
+                    pixel.data[1] as i32,
+                    pixel.data[2] as i32,
+                );
+
+                diff_buffer[i as usize] = (gene_r - source_r).abs() as u8;
+                diff_buffer[i as usize] = (gene_g - source_g).abs() as u8;
+                diff_buffer[i as usize] = (gene_b - source_b).abs() as u8;
 
                 let mut diff = 0.0;
-                diff += ((buffer[i as usize] as i32 - pixel.data[0] as i32) as f32 / 255.0).powi(2);
-                diff += ((buffer[(i + 1) as usize] as i32 - pixel.data[1] as i32) as f32 / 255.0).powi(2);
-                diff += ((buffer[(i + 2) as usize] as i32 - pixel.data[2] as i32) as f32 / 255.0).powi(2);
+                diff += ((gene_r - source_r) as f32 / 255.0).powi(2);
+                diff += ((gene_g - source_g) as f32 / 255.0).powi(2);
+                diff += ((gene_b - source_b) as f32 / 255.0).powi(2);
 
                 fitness += diff;
             }
         }
+
         /*TODO(orglofch): Buffer iterator for (i, &byte) in source_img.iter().enumerate() {
             println!("Buffer {}", (byte as f32 / 255.0));
             let value = byte as f32 / 255.0;
