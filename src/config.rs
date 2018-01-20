@@ -216,7 +216,17 @@ impl Config {
             }
 
             // Checkpoint if necessary.
-            // TODO(orglofch): Checkpoint
+            let should_checkpoint = match self.checkpoint_config {
+                Some(ref config) => i % config.checkpoint_rate == 0,
+                None => false,
+            };
+
+            if should_checkpoint {
+                // TODO(orglofch): Temporary since we want the checkpoint_config to be mutable as well.
+                let checkpoint_config = self.checkpoint_config.take().unwrap();
+                (checkpoint_config.checkpoint_fn)(self, &genome);
+                self.checkpoint_config = Some(checkpoint_config);
+            }
 
             i += 1;
         }
