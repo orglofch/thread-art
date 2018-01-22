@@ -440,13 +440,13 @@ impl Genome {
                 diff_buffer[i as usize] = (gene_b - source_b).abs() as u8;
 
                 let mut diff = 0.0;
-                //diff += (((gene_r - source_r) as f32 / 255.0).abs() + 1.0).log(2.0);
-                //diff += (((gene_g - source_g) as f32 / 255.0).abs() + 1.0).log(2.0);
-                //diff += (((gene_b - source_b) as f32 / 255.0).abs() + 1.0).log(2.0);
+                diff += (((gene_r - source_r) as f32 / 255.0).abs() + 1.0).log(2.0);
+                diff += (((gene_g - source_g) as f32 / 255.0).abs() + 1.0).log(2.0);
+                diff += (((gene_b - source_b) as f32 / 255.0).abs() + 1.0).log(2.0);
 
-                diff += ((gene_r - source_r) as f32 / 255.0).powi(2);
-                diff += ((gene_g - source_g) as f32 / 255.0).powi(2);
-                diff += ((gene_b - source_b) as f32 / 255.0).powi(2);
+                //diff += ((gene_r - source_r) as f32 / 255.0).powi(2);
+                //diff += ((gene_g - source_g) as f32 / 255.0).powi(2);
+                //diff += ((gene_b - source_b) as f32 / 255.0).powi(2);
 
                 fitness += diff;
             }
@@ -464,8 +464,8 @@ impl Genome {
         }*/
 
         // Return the normalized fitness.
-        return 1.0 - fitness / pixel_values as f32 - 0.00000001 * self.actions.len() as f32;
+        return 1.0 - fitness / pixel_values as f32 - 0.000000025 * self.actions.len() as f32;
     }
 }
 
-type Population = Vec<Genome>;
+pub type Population = Vec<Genome>;

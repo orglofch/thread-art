@@ -22,9 +22,7 @@ impl RenderConfig {
 
 impl Default for RenderConfig {
     fn default() -> RenderConfig {
-        RenderConfig {
-            render_pegs: true,
-        }
+        RenderConfig { render_pegs: true }
     }
 }
 

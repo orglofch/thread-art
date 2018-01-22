@@ -67,14 +67,14 @@ impl MutationConfig {
         self
     }
 
-    fn validate(&self) {
+    pub(crate) fn validate(&self) {
         assert!(
-            self.insert_action_prob > self.remove_action_prob,
-            "Probability of additive action mutation should be larger than the probability of a destructive action mutation"
+            self.insert_action_prob >= self.remove_action_prob,
+            "Probability of additive action mutation should be >= the probability of a destructive action mutation"
         );
         assert!(
-            self.insert_peg_prob > self.remove_peg_prob,
-            "Probability of additive peg mutation should be larger than the probability of a destructive peg mutation"
+            self.insert_peg_prob >= self.remove_peg_prob,
+            "Probability of additive peg mutation should be >= than the probability of a destructive peg mutation"
         );
     }
 }

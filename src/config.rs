@@ -11,6 +11,7 @@ use self::glutin::GlContext;
 use self::image::RgbImage;
 use self::rand::Rng;
 use shader::Shader;
+use std::time::Instant;
 
 /// A single peg.
 #[derive(Clone, Debug)]
@@ -141,13 +142,13 @@ impl Config {
         self.validate();
 
         let mut events_loop = glutin::EventsLoop::new();
+
+        // Setup window.
         let window = glutin::WindowBuilder::new()
             .with_title("Thread Art Live Evolution")
             .with_dimensions(self.source_img.width(), self.source_img.height());
         let context = glutin::ContextBuilder::new().with_vsync(true);
-
         let gl_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
-
         unsafe {
             gl_window.make_current().unwrap();
             gl::load_with(|symbol| gl_window.get_proc_address(symbol) as *const _);
@@ -168,6 +169,7 @@ impl Config {
             gl::Disable(gl::CULL_FACE);
         }
 
+        // Load shaders.
         unsafe {
             let shader = Shader::create("data/shader/vs.vert", "data/shader/fs.frag");
             gl::UseProgram(shader.id);
@@ -175,14 +177,11 @@ impl Config {
 
         let mut genome = Genome::new(self.mutable_pegs.clone());
 
-        //genome.mutable_pegs.push(Peg::new((512, 512)));
-        //genome.mutable_pegs.push(Peg::new((1020, 1020)));
-        //genome.actions.push(Action::new(0, 0));
-        //genome.actions.push(Action::new(0, 1));
-
         let mut previous_fitness = 0.0;
         let mut i = 0;
-        loop {
+        while previous_fitness < self.fitness_config.fitness_termination_threshold {
+            let now = Instant::now();
+
             events_loop.poll_events(|_| ());
 
             unsafe {
@@ -210,7 +209,7 @@ impl Config {
 
             // TODO(orglofch): Add boltzmann probability based on fitness for lower
             // fitness genomes.
-            if new_fitness >= previous_fitness || rng.gen_range::<f32>(0.0, 1.0) > 1.99 {
+            if new_fitness >= previous_fitness || rng.gen_range::<f32>(0.0, 1.0) > 0.99 {
                 genome = new_child;
                 previous_fitness = new_fitness;
             }
@@ -224,10 +223,11 @@ impl Config {
             if should_checkpoint {
                 // TODO(orglofch): Temporary since we want the checkpoint_config to be mutable as well.
                 let checkpoint_config = self.checkpoint_config.take().unwrap();
-                (checkpoint_config.checkpoint_fn)(self, &genome);
+                (checkpoint_config.checkpoint_fn)(self, &Vec::new()); // TODO(orglofch): populate.
                 self.checkpoint_config = Some(checkpoint_config);
             }
 
+            println!("FPS: {}", now.elapsed().subsec_nanos() as f64 / 1e-9);
             i += 1;
         }
 
@@ -240,8 +240,8 @@ impl Config {
             !self.threads.is_empty(),
             "There needs to be at least 1 thread"
         );
-        // TODO(orglofch): Validate the pegs are reasonably far from eachother.
 
+        self.mutation_config.validate();
         // TODO(orglofch): Validate the canvas size isn't infinite if mutate_pegs = true.
     }
 }
