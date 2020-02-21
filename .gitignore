@@ -1,9 +1,6 @@
-/target/
-**/*.rs.bk
 Cargo.lock
-/target/
 **/*.rs.bk
-Cargo.lock
 /target/
-**/*.rs.bk
+/checkpoint/
+/data/images/
 **/.DS_Store

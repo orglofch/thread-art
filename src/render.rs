@@ -1,4 +1,7 @@
+extern crate cgmath;
 extern crate gl;
+
+use self::cgmath::{Vector2, Vector4};
 
 use std::mem::size_of;
 use std::os::raw::c_void;
@@ -6,18 +9,7 @@ use std::ptr;
 
 pub struct RenderConfig {
     /// Enables rendering of pegs.
-    render_pegs: bool,
-}
-
-impl RenderConfig {
-    pub fn new() -> RenderConfig {
-        RenderConfig::default()
-    }
-
-    pub fn set_render_pegs(&mut self, enabled: bool) -> &RenderConfig {
-        self.render_pegs = enabled;
-        self
-    }
+    pub render_pegs: bool,
 }
 
 impl Default for RenderConfig {
@@ -26,18 +18,17 @@ impl Default for RenderConfig {
     }
 }
 
-
 /// Vertex information used in rendering the thread art.
 #[derive(Clone, Debug)]
 pub(crate) struct Vertex {
-    /// The `(x, y)` position of the peg in view space (E.g. ((-1, 1), (-1, 1))).
-    pos: (f32, f32),
+    /// The `(x, y)` position of the thread vertex in view space (E.g. ((-1, 1), (-1, 1))).
+    pos: Vector2<f32>,
 
-    colour: (f32, f32, f32),
+    colour: Vector4<f32>,
 }
 
 impl Vertex {
-    pub(crate) fn new(peg: (f32, f32), thread: (f32, f32, f32)) -> Vertex {
+    pub(crate) fn new(peg: Vector2<f32>, thread: Vector4<f32>) -> Vertex {
         Vertex {
             pos: peg,
             colour: thread,
@@ -53,6 +44,12 @@ pub(crate) unsafe fn buffer_to_gpu(
     vbo: u32,
     ebo: u32,
 ) {
+    // TODO: This should be clearing the buffer but BufferData
+    // Segfaults when I give it null.
+    if vertices.len() == 0 || indices.len() == 0 {
+        return;
+    }
+
     gl::BindVertexArray(vao);
 
     gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
@@ -78,7 +75,7 @@ pub(crate) unsafe fn buffer_to_gpu(
     gl::EnableVertexAttribArray(1);
     gl::VertexAttribPointer(
         1,
-        3,
+        4,
         gl::FLOAT,
         gl::FALSE,
         size,
