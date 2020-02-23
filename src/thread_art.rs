@@ -143,12 +143,22 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
 
         gl::GenRenderbuffers(1, &mut rbo);
         gl::BindRenderbuffer(gl::RENDERBUFFER, rbo);
-        gl::RenderbufferStorage(gl::RENDERBUFFER, gl::RGB8, config.target_img.width() as i32, config.target_img.height() as i32);
+        gl::RenderbufferStorage(
+            gl::RENDERBUFFER,
+            gl::RGB8,
+            config.target_img.width() as i32,
+            config.target_img.height() as i32,
+        );
 
         gl::GenFramebuffers(1, &mut fbo);
         gl::BindFramebuffer(gl::FRAMEBUFFER, fbo);
 
-        gl::FramebufferRenderbuffer(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::RENDERBUFFER, rbo);
+        gl::FramebufferRenderbuffer(
+            gl::FRAMEBUFFER,
+            gl::COLOR_ATTACHMENT0,
+            gl::RENDERBUFFER,
+            rbo,
+        );
 
         let status = gl::CheckFramebufferStatus(gl::FRAMEBUFFER);
         if status != gl::FRAMEBUFFER_COMPLETE {
@@ -251,7 +261,7 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
     let mut paused = false;
     let mut show_pegs = false;
     let mut paused_i = lines.len();
-    let mut temperature = 0.0015;
+    let mut temperature = 0.0;//0.0015;
     let entropy = 0.99995;
     let mut speed = 1;
     let mut iteration = 0_u32;
@@ -269,38 +279,52 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
             glutin::Event::WindowEvent { event, .. } => {
                 match event {
                     glutin::WindowEvent::Closed => running = false,
-                    glutin::WindowEvent::ReceivedCharacter(input) => {
-                        match input {
-                            'q' | 'Q' => running = false,
-                            'p' | 'P' => {
-                                if paused {
-                                    paused = false;
+                    glutin::WindowEvent::KeyboardInput { device_id, input } => {
+                        match input.virtual_keycode {
+                            Some(glutin::VirtualKeyCode::Q) => {
+                                if input.state == glutin::ElementState::Pressed {
+                                    running = false;
+                                }
+                            },
+                            Some(glutin::VirtualKeyCode::P) => {
+                                if input.state == glutin::ElementState::Pressed {
+                                    if paused {
+                                        paused = false;
+                                    } else {
+                                        paused = true;
+                                        paused_i = lines.len() - 1
+                                    }
+                                }
+                            },
+                            Some(glutin::VirtualKeyCode::A) => {
+                                if input.state == glutin::ElementState::Pressed {
+                                    if paused {
+                                        paused_i = std::cmp::max(0, paused_i as i32 - speed as i32) as
+                                            usize;
+                                    }
+                                    speed += 1;
                                 } else {
-                                    paused = true;
-                                    paused_i = lines.len() - 1;
+                                    speed = 1;
                                 }
-                            }
-                            'a' | 'A' => {
-                                if paused {
-                                    paused_i = std::cmp::max(0, paused_i as i32 - speed as i32) as
-                                        usize;
+                            },
+                            Some(glutin::VirtualKeyCode::D) => {
+                                if input.state == glutin::ElementState::Pressed {
+                                    if paused {
+                                        paused_i = std::cmp::min(lines.len() - 1, paused_i + speed);
+                                    }
+                                    speed += 1;
+                                } else {
+                                    speed = 1;
                                 }
-                                speed += 1;
-                            }
-                            'd' | 'D' => {
-                                if paused {
-                                    paused_i = std::cmp::min(lines.len() - 1, paused_i + speed);
+                            },
+                            Some(glutin::VirtualKeyCode::S) => {
+                                if input.state == glutin::ElementState::Pressed {
+                                    show_pegs = !show_pegs;
                                 }
-                                speed += 1;
-                            }
-                            's' | 'S' => {
-                                show_pegs = !show_pegs;
-                            }
-                            _ => {
-                                speed = 1;
-                            }
+                            },
+                            _ => (),
                         }
-                    }
+                    },
                     _ => (),
                 }
             }
