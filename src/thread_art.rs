@@ -20,11 +20,12 @@ use self::cgmath::{Matrix, MetricSpace, Vector2, Vector3, Vector4};
 use self::cgmath::prelude::InnerSpace;
 use self::csv::Writer;
 use self::glutin::GlContext;
-use self::image::{GrayImage, RgbImage};
+use self::image::{ImageBuffer, RgbImage};
 use self::rand::Rng;
 use self::serde::{Serialize, Deserialize};
 
 use image_utils::*;
+use raster::*;
 use render::*;
 use shader::*;
 
@@ -50,27 +51,27 @@ pub struct ThreadArt {
 
 /// Configuration options for the thread art solver.
 pub struct ThreadArtConfig {
-    /// The target image to match.
-    pub target_img: RgbImage,
+    /// The target raster to match.
+    pub target_raster: Raster<f32>,
 
     /// The set of peg positions that threads can be wrapped around.
     pub pegs: Vec<Vector2<u32>>,
 
-    /// The `(r, g, b)` threads.
-    pub threads: Vec<Vector3<u8>>,
+    /// The normalized [0, 1] `(r, g, b)` threads.
+    pub threads: Vec<Vector3<f32>>,
 
-    /// The `(r, g, b)` background colour.
+    /// The normalized [0, 1] `(r, g, b)` background colour.
     ///
     /// TODO(orglofch): Support arbitrary textures.
-    pub background_colour: Vector3<u8>,
+    pub background_colour: Vector3<f32>,
 
     /// Checkpoint file.
     pub checkpoint_file: String,
     /// How frequently to checkpoint.
     pub checkpoint_frequency: Duration,
 
-    /// Image indicating salient features in the `target_image`.
-    pub saliency_map: Option<GrayImage>,
+    /// Raster indicating salient features in the `target_raster`.
+    pub saliency_raster: Option<Raster<f32>>,
 
     /// Fitness CSV file.
     pub fitness_csv_file: String,
@@ -84,7 +85,7 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
         .with_title("Thread Art")
         // Divide by two to counteract retina display.
         // TODO(orglofch): Pull in device information to decide this.
-        .with_dimensions(config.target_img.width() / 2, config.target_img.height() / 2);
+        .with_dimensions(config.target_raster.width as u32 / 2, config.target_raster.height as u32 / 2);
     let context = glutin::ContextBuilder::new().with_vsync(true);
     let mut events_loop = glutin::EventsLoop::new();
     let gl_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
@@ -108,9 +109,9 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
         // OpenGL conventions have inverted y-axis.
         let ortho_mat = cgmath::ortho(
             0.0,
-            config.target_img.width() as f32,
+            config.target_raster.width as f32,
             0.0,
-            config.target_img.height() as f32,
+            config.target_raster.height as f32,
             -1.0,
             1.0,
         );
@@ -146,8 +147,8 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
         gl::RenderbufferStorage(
             gl::RENDERBUFFER,
             gl::RGB8,
-            config.target_img.width() as i32,
-            config.target_img.height() as i32,
+            config.target_raster.width as i32,
+            config.target_raster.height as i32,
         );
 
         gl::GenFramebuffers(1, &mut fbo);
@@ -169,9 +170,9 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
 
         // TODO: Support using an arbitrary texture for the background.
         gl::ClearColor(
-            config.background_colour[0] as f32 / 255.0,
-            config.background_colour[1] as f32 / 255.0,
-            config.background_colour[2] as f32 / 255.0,
+            config.background_colour[0],
+            config.background_colour[1],
+            config.background_colour[2],
             1.0,
         );
 
@@ -207,7 +208,7 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
     // Reversed (start, end) -> (end, start) patterns are not included so the pegs used
     // in lines should be reversed to calculate the full list.
     let k_max_peg_move_distance = 25.0;
-    let mut peg_transitions: HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
+    let peg_transitions: HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
     /*for i in 0..config.pegs.len() {
         let start = config.pegs[i].cast::<f64>().unwrap();
         for j in (i + 1)..config.pegs.len() {
@@ -255,25 +256,103 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
 
     let mut last_fitness_record_iteration = 0;
     let k_fitness_record_frequency = 100;
-    let mut fitness_graph_points: Vec<(u32, f64)> = Vec::new();
+    let mut fitness_graph_points: Vec<(u32, f32)> = Vec::new();
 
     let mut running = true;
     let mut paused = false;
+    let mut replay = false;
     let mut show_pegs = false;
     let mut paused_i = lines.len();
-    let mut temperature = 0.0;//0.0015;
+    let mut temperature = 0.0; //0.0015;
     let entropy = 0.99995;
     let mut speed = 1;
     let mut iteration = 0_u32;
 
-    let (width, height) = config.target_img.dimensions();
-    let mut img_buffer = Raster::new(
-        width as usize,
-        height as usize,
-        vec![0_u8; width as usize * height as usize * 3],
+    let mut current_raster = Raster::zero(
+        config.target_raster.width,
+        config.target_raster.height,
+        config.target_raster.channels,
+    );
+    for y in 0..current_raster.height {
+        for x in 0..current_raster.width {
+            for c in 0..current_raster.channels {
+                current_raster.set(x, y, c, config.background_colour[c as usize]);
+            }
+        }
+    }
+
+    // Create a raster with 1's wherever we have pegs and 0 everywhere else.
+    let mut peg_raster = Raster::zero(
+        config.target_raster.width,
+        config.target_raster.height,
+        config.target_raster.channels,
+    );
+    for peg in &config.pegs {
+        for c in 0..3 {
+            peg_raster.set(peg.x, peg.y, c, 1.0);
+        }
+    }
+
+    // Create a raster where each pixel is weighted from it's distance from the origin.
+    let mut guassian = create_gaussian(
+        /*sigma=*/
+        128.0,
+        config.target_raster.width,
+        config.target_raster.height,
+        config.target_raster.channels,
     );
 
-    let mut last_start_time = Instant::now();
+    let mut convolved = convolvef(&peg_raster, &guassian);
+    let mut max_val = 0.0_f32;
+    for y in 0..convolved.height {
+        for x in 0..convolved.width {
+            for c in 0..3 {
+                max_val = max_val.max(convolved.get(x, y, c));
+            }
+        }
+    }
+    for y in 0..convolved.height {
+        for x in 0..convolved.width {
+            for c in 0..3 {
+                convolved.set(x, y, c, 1.0 - convolved.get(x, y, c) / max_val);
+            }
+        }
+    }
+
+    let mut saliency = saliency(&config.target_raster);
+
+    // TODO: Try slowly diffusing this weight over time.
+    let mut weight = Raster::zero(config.target_raster.width, config.target_raster.height, 3);
+    for y in 0..convolved.height {
+        for x in 0..convolved.width {
+            for c in 0..3 {
+                weight.set(
+                    x,
+                    y,
+                    c,
+                    (saliency.get(x, y, c) * convolved.get(x, y, c)).max(0.01),
+                );
+            }
+        }
+    }
+
+    let mut output_rgb =
+        vec![0_u8; weight.width as usize * weight.height as usize * weight.channels as usize];
+    for y in 0..weight.height {
+        for x in 0..weight.width {
+            for c in 0..weight.channels {
+                output_rgb[c as usize +
+                               ((x as usize + y as usize * weight.width as usize) *
+                                    weight.channels as usize)] = (weight.get(x, y, c) * 255.0) as
+                    u8;
+            }
+        }
+    }
+    let output_img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
+        image::ImageBuffer::from_raw(weight.width, weight.height, output_rgb).unwrap();
+    output_img.save("/tmp/output.png").unwrap();
+
+    let start_time = Instant::now();
     while running {
         events_loop.poll_events(|event| match event {
             glutin::Event::WindowEvent { event, .. } => {
@@ -285,28 +364,30 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
                                 if input.state == glutin::ElementState::Pressed {
                                     running = false;
                                 }
-                            },
+                            }
                             Some(glutin::VirtualKeyCode::P) => {
                                 if input.state == glutin::ElementState::Pressed {
                                     if paused {
                                         paused = false;
                                     } else {
                                         paused = true;
-                                        paused_i = lines.len() - 1
+                                        paused_i = lines.len() - 1;
+                                        replay = false;
                                     }
                                 }
-                            },
+                            }
                             Some(glutin::VirtualKeyCode::A) => {
                                 if input.state == glutin::ElementState::Pressed {
                                     if paused {
-                                        paused_i = std::cmp::max(0, paused_i as i32 - speed as i32) as
-                                            usize;
+                                        paused_i =
+                                            std::cmp::max(0, paused_i as i32 - speed as i32) as
+                                                usize;
                                     }
                                     speed += 1;
                                 } else {
                                     speed = 1;
                                 }
-                            },
+                            }
                             Some(glutin::VirtualKeyCode::D) => {
                                 if input.state == glutin::ElementState::Pressed {
                                     if paused {
@@ -316,53 +397,69 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
                                 } else {
                                     speed = 1;
                                 }
-                            },
+                            }
                             Some(glutin::VirtualKeyCode::S) => {
                                 if input.state == glutin::ElementState::Pressed {
                                     show_pegs = !show_pegs;
                                 }
-                            },
+                            }
+                            Some(glutin::VirtualKeyCode::R) => {
+                                if input.state == glutin::ElementState::Pressed {
+                                    if !replay {
+                                        paused_i = 0;
+                                        replay = true;
+                                    } else {
+                                        replay = false;
+                                    }
+                                }
+                            }
                             _ => (),
                         }
-                    },
+                    }
                     _ => (),
                 }
             }
             _ => (),
         });
 
+        if replay {
+            paused_i = std::cmp::min(lines.len() - 1, paused_i + 1);
+        }
+
+
         // TODO: Don't do this when paused.
         let sample = if !paused {
             sample_new_lines(&config, &lines, &peg_transitions)
         } else {
-            lines.to_vec()
+            lines.to_vec() // TODO: Remove copy?
         };
 
-        /*let sample = vec![
-            Line {
-                start_peg: 0,
-                end_peg: i % config.pegs.len(),
-                thread: 6
-            }
-        ];*/
-        // Build index buffers.
-        // TODO: Incrementally update the buffers instead of rebuilding.
-
-        //draw_line(&config.pegs[best_line.start_peg], &config.pegs[best_line.end_peg],
-        //&config.threads[best_line.thread], &mut source_img);
-
-        //lines.push(best_line);
-
-        let (thread_vertices, thread_indices) = if paused {
+       let (thread_vertices, thread_indices) = if paused {
             build_vertex_index(&config, &lines[0..paused_i])
         } else {
             build_vertex_index(&config, &sample)
-        };
+       };
+
+        ////////// GREEDY /////////////
+
+        // TODO: Handle options.
+        // TODO: Incorporate pausing.
+        /*let best_line = find_best_line(&config, &current_raster).unwrap();
+        draw_line(
+            &config.pegs[best_line.start_peg],
+            &config.pegs[best_line.end_peg],
+            &config.threads[best_line.thread],
+            &mut current_raster,
+        );
+        println!("{:?}", best_line);
+        lines.push(best_line);
+        let sample = lines.to_vec(); // TODO: Remove copy?
+        // TODO: No need to do this every frame for greedy. Same with all the rendering.
+        let (thread_vertices, thread_indices) = build_vertex_index(&config, &lines);*/
+
+        ////////////////////////////////
 
         unsafe {
-            //gl::BindFramebuffer(gl::FRAMEBUFFER, fbo);
-            //gl::DrawBuffers(1, &mut fbo);
-
             gl::Clear(gl::COLOR_BUFFER_BIT);
 
             buffer_to_gpu(&thread_vertices, &thread_indices, vao, vbo, ebo);
@@ -378,15 +475,33 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
 
             // Read back the rendered state.
             // TODO: Try reading asynchronously from pbo.
+            // TODO: Don't hardcode 3 here.
+            // TODO: Use as scratch.
+            let mut back_buffer =
+                Raster::new(
+                    current_raster.width,
+                    current_raster.height,
+                    3,
+                    vec![0_u8; current_raster.width as usize * current_raster.height as usize * 3],
+                );
             gl::ReadPixels(
                 0,
                 0,
-                config.target_img.width() as i32,
-                config.target_img.height() as i32,
+                current_raster.width as i32,
+                current_raster.height as i32,
+                // TODO: Set based on number of channels in target.
                 gl::RGB,
                 gl::UNSIGNED_BYTE,
-                &mut img_buffer.data[0] as *mut u8 as *mut c_void,
+                &mut back_buffer.data[0] as *mut u8 as *mut c_void,
             );
+
+            for y in 0..back_buffer.height {
+                for x in 0..back_buffer.width {
+                    for c in 0..back_buffer.channels {
+                        current_raster.set(x, y, c, back_buffer.get(x, y, c) as f32 / 255.0);
+                    }
+                }
+            }
 
             if show_pegs {
                 gl::BindVertexArray(peg_vao);
@@ -399,19 +514,15 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
                 gl::BindVertexArray(0);
             }
 
-            // TODO: Flip buffer vertically.
-
-            //gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            // TODO: Figure out a nice way to flip this buffer.
         }
 
         // TODO: The concept of cost vs fitness is currently flipped here.
-        let mut new_cost = cost(&config, &img_buffer);
+        let mut new_cost = cost(&config, &current_raster, &weight);
 
-        new_cost -= sample.len() as f64 * 0.00001;
+        new_cost -= sample.len() as f32 * 0.00001;
 
         let acceptance_probability = boltzmann_probability(previous_cost, new_cost, temperature); //(new_cost / previous_cost).powf(500.0).min(1.0);
-
-        //println!("Acceptance probability {}", acceptance_probability);
 
         // TODO: Consolidate all the paused logic.
         if !paused &&
@@ -431,7 +542,7 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
             println!("Cost: {}", previous_cost);
             println!(
                 "IPS {:?}",
-                iteration / (last_start_time.elapsed().as_secs() + 1) as u32
+                iteration / (start_time.elapsed().as_secs() + 1) as u32
             );
             println!("Lines {}", lines.len());
             println!("Iterations {}", iteration);
@@ -482,7 +593,7 @@ pub fn run_solver(config: &ThreadArtConfig) -> ThreadArt {
 }
 
 
-fn boltzmann_probability(current_fitness: f64, new_fitness: f64, temperature: f64) -> f64 {
+fn boltzmann_probability(current_fitness: f32, new_fitness: f32, temperature: f32) -> f32 {
     let diff = new_fitness - current_fitness;
     return if temperature <= 0.0 {
         0.0
@@ -564,35 +675,31 @@ fn deserialize(buffer: &Vec<u8>) -> Vec<Line> {
 /// term here.
 /// TODO: Try different image fitness.
 /// TODO: This is really expensive for some reason.
-fn cost(config: &ThreadArtConfig, source_img: &Raster<u8>) -> f64 {
-    assert_eq!(config.target_img.width() as usize, source_img.width);
-    assert_eq!(config.target_img.height() as usize, source_img.height);
+fn cost(
+    config: &ThreadArtConfig,
+    current_raster: &Raster<f32>,
+    weight_raster: &Raster<f32>,
+) -> f32 {
+    assert_eq!(current_raster.width, config.target_raster.width);
+    assert_eq!(current_raster.height, config.target_raster.height);
+    assert_eq!(current_raster.channels, config.target_raster.channels);
 
-    let total_pixels = config.target_img.width() * config.target_img.height();
+    let total_pixels = current_raster.width * current_raster.height * current_raster.channels;
 
     let mut total_weight = 0.0;
     let mut error = 0.0;
-    for y in 0..config.target_img.height() {
-        for x in 0..config.target_img.width() {
-            let target_pixel: Vector3<f64> = {
-                let pixel = config.target_img.get_pixel(x as u32, y as u32);
-                Vector3::from(pixel.data).cast::<f64>().unwrap() / 255.0
-            };
-            let source_pixel: Vector3<f64> = source_img
-                .get(x as usize, y as usize)
-                .cast::<f64>()
-                .unwrap() / 255.0;
+    for y in 0..current_raster.height {
+        for x in 0..current_raster.width {
+            for c in 0..current_raster.channels {
+                let weight = weight_raster.get(x, y, c);
+                let target_pixel = config.target_raster.get(x, y, c);
+                let source_pixel = current_raster.get(x, y, c);
 
-            let weight = match config.saliency_map {
-                Some(ref image) => image.get_pixel(x as u32, y as u32)[0] as f64 / 255.0,
-                None => 1.0,
-            };
-
-            // TODO: Geometric distance between colors doesn't work well for RGBs.
-            let distance = target_pixel.distance(source_pixel);
-            // TODO: Try L1 norm.
-            error += distance * distance * weight;
-            total_weight += weight;
+                let diff = target_pixel - source_pixel;
+                // TODO: Try L1 norm.
+                error += diff * diff * weight;
+                total_weight += weight;
+            }
         }
     }
 
@@ -635,12 +742,7 @@ fn build_vertex_index(config: &ThreadArtConfig, lines: &[Line]) -> (Vec<Vertex>,
         let colour = config.threads[line.thread];
 
         // Dequantize the colour and add alpha.
-        let dequantized_colour = Vector4::new(
-            colour[0] as f32 / 255.0,
-            colour[1] as f32 / 255.0,
-            colour[2] as f32 / 255.0,
-            1.0,
-        );
+        let dequantized_colour = Vector4::new(colour[0], colour[1], colour[2], 1.0);
 
         // Place the vertex info in tuples since the render struct Vertex uses f32s for rendering.
         let vertex_start_info = (line.start_peg, line.thread);
@@ -760,15 +862,11 @@ fn sample_new_lines(
 /// The best line is the line which removes the most error between
 /// the current image and the source image. If there is no best
 /// line, None is returned.
-fn find_best_line(
-    config: &ThreadArtConfig,
-    lines: &Vec<Line>,
-    source_img: &RgbImage,
-) -> Option<Line> {
+fn find_best_line(config: &ThreadArtConfig, current_raster: &Raster<f32>) -> Option<Line> {
     // TODO: Make this a param.
     //const THREADS: usize = 32;
     //let threads: Vec<_> = (0..THREADS).map(|_| thread::spawn(|| Stats(4))).collect();
-    let mut best_fitness = std::f64::MIN;
+    let mut best_fitness = std::f32::MIN;
     let mut best_thread = None;
     for s in 0..config.pegs.len() {
         let peg_1 = config.pegs[s];
@@ -781,16 +879,16 @@ fn find_best_line(
                     continue;
                 }
 
-                let length = (peg_1.cast::<f64>().unwrap() - peg_2.cast::<f64>().unwrap())
+                let length = (peg_1.cast::<f32>().unwrap() - peg_2.cast::<f32>().unwrap())
                     .magnitude();
 
                 let fitness = line_fitness(
-                    &config.target_img,
-                    &source_img,
+                    &config.target_raster,
+                    &current_raster,
                     &peg_1,
                     &peg_2,
                     &config.threads[t],
-                ); // / length;
+                ); // TODO: / length;
 
                 if fitness > best_fitness {
                     best_thread = Some(Line {

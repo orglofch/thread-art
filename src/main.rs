@@ -10,6 +10,7 @@ mod macros;
 
 mod image_utils;
 mod peg_factory;
+mod raster;
 mod render;
 mod shader;
 mod thread_art;
@@ -21,16 +22,19 @@ use clap::{App, Arg};
 use peg_factory::{PegPattern, create_pegs};
 
 use image_utils::*;
+use raster::*;
 use thread_art::*;
 
 // TODO: Update visibility of all targets.
 
-// TODO: Add a saliency mask.
-
-/// Parses a hexidecimal string into an RGB vector.
-fn parse_hex_str(hex: &str) -> Vector3<u8> {
+/// Parses a hexidecimal string into a normalized [0, 1] RGB vector.
+fn parse_hex_str(hex: &str) -> Vector3<f32> {
     let hex = hex::decode(hex).unwrap();
-    Vector3::new(hex[0], hex[1], hex[2])
+    Vector3::new(
+        hex[0] as f32 / 255.0,
+        hex[1] as f32 / 255.0,
+        hex[2] as f32 / 255.0,
+    )
 }
 
 fn main() {
@@ -55,6 +59,12 @@ fn main() {
                 .help("Valid thread colours."),
         )
         .arg(
+            Arg::with_name("thread_count")
+                .short("tc")
+                .long("thread_count")
+                .help("The number of threads.")
+        )
+        .arg(
             Arg::with_name("background_colour")
                 .short("b")
                 .long("background")
@@ -66,7 +76,16 @@ fn main() {
             Arg::with_name("peg_pattern")
                 .short("p")
                 .long("pattern")
-                .possible_values(&["Uniform", "Rect", "Oval", "ConcentricOval", "Spiral", "Random"])
+                .possible_values(
+                    &[
+                        "Uniform",
+                        "Rect",
+                        "Oval",
+                        "ConcentricOval",
+                        "Spiral",
+                        "Random",
+                    ],
+                )
                 .default_value("Oval")
                 .help("The peg pattern to use."),
         )
@@ -89,7 +108,6 @@ fn main() {
                 .default_value("10")
                 .help("The frequency to checkpoint the solution."),
         )
-        // TODO(orglofch): Derive this programmatically if not provided.
         .arg(
             Arg::with_name("saliency_map")
                 .long("saliency_map")
@@ -103,7 +121,7 @@ fn main() {
                 .long("fitness_csv_file")
                 .value_name("FILE")
                 .default_value("")
-                .help( "A CSV file to output fitness samples to."),
+                .help("A CSV file to output fitness samples to."),
         )
         .get_matches();
 
@@ -111,13 +129,41 @@ fn main() {
     let target_img = image::open(matches.value_of("image").unwrap())
         .unwrap()
         .to_rgb();
-    let threads = {
+    // TODO(orglofch): Move conversion to image_utils.
+    let mut target_raster =
+        Raster::new(
+            target_img.width(),
+            target_img.height(),
+            3,
+            vec![0.0; target_img.width() as usize * target_img.height() as usize * 3],
+        );
+    for y in 0..target_raster.height {
+        for x in 0..target_raster.width {
+            let pixel = target_img.get_pixel(x as u32, y as u32);
+            for c in 0..target_raster.channels {
+                target_raster.set(x, y, c, pixel[c as usize] as f32 / 255.0);
+            }
+        }
+    }
+
+    // TODO: Incorprate threads only keeping the furthest ones.
+    /*let threads = {
         let mut colours = Vec::new();
         for colour in matches.values_of("thread_colours").unwrap() {
             colours.push(parse_hex_str(colour));
         }
         colours
-    };
+};*/
+    let dominant_colours = image_utils::k_dominant_colours(&target_raster, 10);
+    let mut threads = Vec::new();
+    for dominant_colour in dominant_colours {
+        let mut colour = Vector3::new(0.0, 0.0, 0.0);
+        for c in 0..3 {
+            colour[c] = dominant_colour[c];
+        }
+        threads.push(colour);
+    }
+
     let background_colour = parse_hex_str(matches.value_of("background_colour").unwrap());
     let peg_pattern = matches.value_of("peg_pattern").unwrap();
     let num_pegs = matches
@@ -133,11 +179,29 @@ fn main() {
             .parse::<u64>()
             .unwrap(),
     );
-    let saliency_map = match matches.value_of("saliency_map") {
-        Some(path) => Some(image::open(path).unwrap().to_luma()),
-        None => {
-            None//Some(create_saliency_map(&target_img))
+    let saliency_raster = match matches.value_of("saliency_map") {
+        Some(saliency_path) => {
+            let saliency_img = image::open(saliency_path).unwrap().to_luma();
+            let mut saliency_raster =
+                Raster::new(
+                    saliency_img.width(),
+                    saliency_img.height(),
+                    1,
+                    vec![0.0; saliency_img.width() as usize * saliency_img.height() as usize],
+                );
+            for y in 0..target_raster.height {
+                for x in 0..target_raster.width {
+                    saliency_raster.set(
+                        x,
+                        y,
+                        0,
+                        saliency_img.get_pixel(x as u32, y as u32)[0] as f32 / 255.0,
+                    );
+                }
+            }
+            Some(saliency_raster)
         }
+        None => None,
     };
     let fitness_csv_file = matches.value_of("fitness_csv_file").unwrap().to_string();
 
@@ -151,13 +215,13 @@ fn main() {
     );
 
     let config = ThreadArtConfig {
-        target_img: target_img,
+        target_raster: target_raster,
         pegs: pegs,
         threads: threads,
         background_colour: background_colour,
         checkpoint_file: checkpoint_file,
         checkpoint_frequency: checkpoint_frequency,
-        saliency_map: saliency_map,
+        saliency_raster: saliency_raster,
         fitness_csv_file: fitness_csv_file,
     };
 

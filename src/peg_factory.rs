@@ -22,7 +22,12 @@ pub(crate) enum PegPattern {
 /// `height` - The height of the area pegs can be placed within.
 /// `num_pegs` - The number of pegs to create.
 /// `pattern` - The pattern to draw pegs from.
-pub(crate) fn create_pegs(width: u32, height: u32, num_pegs: u32, pattern: PegPattern) -> Vec<Vector2<u32>> {
+pub(crate) fn create_pegs(
+    width: u32,
+    height: u32,
+    num_pegs: u32,
+    pattern: PegPattern,
+) -> Vec<Vector2<u32>> {
     match pattern {
         PegPattern::Uniform => create_uniform_peg_pattern(width, height, num_pegs),
         PegPattern::Rect => create_rect_peg_pattern(width, height, num_pegs),
@@ -58,11 +63,7 @@ impl std::str::FromStr for PegPattern {
 /// |+ +  +  + +|
 /// |+ +  +  + +|
 /// |+_+__+__+_+|
-fn create_uniform_peg_pattern(
-    width: u32,
-    height: u32,
-    num_pegs: u32,
-) -> Vec<Vector2<u32>> {
+fn create_uniform_peg_pattern(width: u32, height: u32, num_pegs: u32) -> Vec<Vector2<u32>> {
     let area = width * height;
 
     let pegs_sqrt = (num_pegs as f32).sqrt();
@@ -149,13 +150,9 @@ fn create_oval_peg_pattern(width: u32, height: u32, num_pegs: u32) -> Vec<Vector
 /// |+  +   +  +|
 /// | +  +++  + |
 /// |___+_+_+___|
-fn create_concentric_oval_pattern(
-    width: u32,
-    height: u32,
-    num_pegs: u32,
-) -> Vec<Vector2<u32>> {
+fn create_concentric_oval_pattern(width: u32, height: u32, num_pegs: u32) -> Vec<Vector2<u32>> {
     // Determine the number of ovals.
-    let k_pixels_between_ovals = 25;
+    let k_pixels_between_ovals = 50;
     let ovals = (width as f32 / 2.0 / k_pixels_between_ovals as f32) as u32;
 
     let pegs_per_oval = num_pegs / ovals;
@@ -166,7 +163,11 @@ fn create_concentric_oval_pattern(
 
     let mut pegs = Vec::new();
     for i in 0..ovals {
-        let axis = center_cell - Vector2::new((k_pixels_between_ovals * i) as f32, (k_pixels_between_ovals * i) as f32);
+        let axis = center_cell -
+            Vector2::new(
+                (k_pixels_between_ovals * i) as f32,
+                (k_pixels_between_ovals * i) as f32,
+            );
 
         for j in 0..pegs_per_oval {
             let rad = rad_per_peg * j as f32;
@@ -188,11 +189,7 @@ fn create_concentric_oval_pattern(
 /// |+  +   +  +|
 /// | +      +  |
 /// |___+_+_+___|
-fn create_spiral_peg_pattern(
-    width: u32,
-    height: u32,
-    num_pegs: u32,
-) -> Vec<Vector2<u32>> {
+fn create_spiral_peg_pattern(width: u32, height: u32, num_pegs: u32) -> Vec<Vector2<u32>> {
     let mut pegs = Vec::new();
 
     return pegs;
@@ -205,11 +202,7 @@ fn create_spiral_peg_pattern(
 /// |+        + |
 /// |  +  +  +  |
 /// |_+___+____+|
-fn create_random_peg_pattern(
-    width: u32,
-    height: u32,
-    num_pegs: u32,
-) -> Vec<Vector2<u32>> {
+fn create_random_peg_pattern(width: u32, height: u32, num_pegs: u32) -> Vec<Vector2<u32>> {
     let mut rng = rand::thread_rng();
 
     let mut pegs = Vec::new();
